@@ -1,49 +1,55 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use chrono::{DateTime, Utc};
 
-/// 消息类型枚举
+/// 简化的消息类型，专注于服务器间文本通信
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageType {
     /// 文本消息
-    Text(String),
-    /// 用户加入
-    UserJoined(String),
-    /// 用户离开
-    UserLeft(String),
-    /// 文件传输请求
-    FileRequest { filename: String, size: u64 },
-    /// 文件传输数据
-    FileData { chunk_id: u32, data: Vec<u8> },
-    /// 心跳包
+    Text { content: String },
+    /// 连接握手
+    Hello { server_id: String },
+    /// 连接确认
+    Welcome { server_id: String },
+    /// 心跳
     Ping,
     /// 心跳响应
     Pong,
 }
 
-/// 即时消息结构
+/// 服务器间消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub id: u64,
-    pub timestamp: u64,
-    pub sender: String,
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub from_server: String,
+    pub to_server: Option<String>, // None表示广播
     pub message_type: MessageType,
 }
 
 impl Message {
     /// 创建新消息
-    pub fn new(id: u64, sender: String, message_type: MessageType) -> Self {
+    pub fn new(from_server: String, message_type: MessageType) -> Self {
         Self {
-            id,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            sender,
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            from_server,
+            to_server: None,
             message_type,
         }
     }
 
-    /// 序列化为JSON字节数组
+    /// 创建发送给特定服务器的消息
+    pub fn new_to(from_server: String, to_server: String, message_type: MessageType) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            from_server,
+            to_server: Some(to_server),
+            message_type,
+        }
+    }
+
+    /// 序列化为字节数组
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let json = serde_json::to_string(self)?;
         Ok(json.into_bytes())
@@ -55,37 +61,30 @@ impl Message {
         let message = serde_json::from_str(&json)?;
         Ok(message)
     }
-}
 
-/// 用户会话管理
-#[derive(Debug)]
-pub struct Session {
-    pub users: HashMap<String, quinn::Connection>,
-    pub message_counter: u64,
-}
-
-impl Session {
-    pub fn new() -> Self {
-        Self {
-            users: HashMap::new(),
-            message_counter: 0,
+    /// 格式化显示消息
+    pub fn format_display(&self) -> String {
+        match &self.message_type {
+            MessageType::Text { content } => {
+                format!("[{}] {}: {}", 
+                    self.timestamp.format("%H:%M:%S"),
+                    self.from_server,
+                    content
+                )
+            }
+            MessageType::Hello { server_id } => {
+                format!("[{}] {} 加入聊天室", 
+                    self.timestamp.format("%H:%M:%S"),
+                    server_id
+                )
+            }
+            MessageType::Welcome { server_id } => {
+                format!("[{}] 欢迎 {} 加入", 
+                    self.timestamp.format("%H:%M:%S"),
+                    server_id
+                )
+            }
+            _ => String::new(), // 心跳消息不显示
         }
-    }
-
-    pub fn add_user(&mut self, username: String, connection: quinn::Connection) {
-        self.users.insert(username, connection);
-    }
-
-    pub fn remove_user(&mut self, username: &str) -> Option<quinn::Connection> {
-        self.users.remove(username)
-    }
-
-    pub fn next_message_id(&mut self) -> u64 {
-        self.message_counter += 1;
-        self.message_counter
-    }
-
-    pub fn get_user_count(&self) -> usize {
-        self.users.len()
     }
 }

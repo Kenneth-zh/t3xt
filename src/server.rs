@@ -1,218 +1,217 @@
-use crate::{crypto, message};
+use crate::{crypto, message::*};
 use anyhow::{Context, Result};
-use quinn::{Endpoint, ServerConfig};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use quinn::{Connection, Endpoint, ServerConfig};
+use std::{collections::HashMap, sync::Arc};
+use tokio::{io::{AsyncBufReadExt, BufReader}, sync::RwLock};
 use tracing::{error, info, warn};
 
-/// QUIC服务器
 pub struct Server {
-    pub endpoint: Endpoint,
-    pub session: Arc<RwLock<message::Session>>,
+    server_id: String,
+    port: u16,
+    endpoint: Endpoint,
+    peers: Arc<RwLock<HashMap<String, Connection>>>,
 }
 
 impl Server {
-    /// 创建新的服务器实例
-    pub fn new(bind_addr: &str, port: u16) -> Result<Self> {
-        // 生成自签名证书
+    pub fn new(server_id: String, port: u16) -> Result<Self> {
         let cert_config = crypto::CertConfig::generate_self_signed()
             .context("Failed to generate certificate")?;
 
-        // 创建TLS配置
-        let tls_config = crypto::create_server_config(cert_config)
-            .context("Failed to create TLS config")?;
+        let server_config = crypto::create_server_config(cert_config)
+            .context("Failed to create server config")?;
 
-        // 创建QUIC服务器配置
-        let server_config = ServerConfig::with_crypto(Arc::new(tls_config));
+        let bind_addr = format!("0.0.0.0:{}", port);
+        let endpoint = Endpoint::server(
+            ServerConfig::with_crypto(Arc::new(server_config)),
+            bind_addr.parse()?,
+        ).context("Failed to create server endpoint")?;
 
-        // 绑定地址
-        let bind_addr = format!("{}:{}", bind_addr, port);
-        
-        // 创建endpoint
-        let endpoint = Endpoint::server(server_config, bind_addr.parse()?)
-            .context("Failed to create endpoint")?;
-
-        info!("Server listening on {}", bind_addr);
+        info!("服务器 {} 启动，监听地址: {}", server_id, bind_addr);
 
         Ok(Self {
+            server_id,
+            port,
             endpoint,
-            session: Arc::new(RwLock::new(message::Session::new())),
+            peers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    /// 启动服务器并处理连接
     pub async fn run(&self) -> Result<()> {
-        info!("Server started, waiting for connections...");
+        println!("🚀 服务器 '{}' 启动在端口 {}", self.server_id, self.port);
+        println!("等待其他服务器连接...");
+        println!("输入消息开始广播，输入 '/quit' 退出");
+        println!("─────────────────────────────");
 
-        while let Some(conn) = self.endpoint.accept().await {
-            let session = Arc::clone(&self.session);
+        let accept_task = {
+            let endpoint = self.endpoint.clone();
+            let peers = Arc::clone(&self.peers);
+            let server_id = self.server_id.clone();
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(conn, session).await {
-                    error!("Connection failed: {}", e);
-                }
-            });
-        }
+                Self::handle_incoming_connections(endpoint, peers, server_id).await;
+            })
+        };
 
+        let input_task = {
+            let peers = Arc::clone(&self.peers);
+            let server_id = self.server_id.clone();
+            tokio::spawn(async move {
+                Self::handle_user_input(peers, server_id).await;
+            })
+        };
+
+        let _ = tokio::try_join!(accept_task, input_task);
         Ok(())
     }
 
-    /// 处理单个连接
-    async fn handle_connection(
-        conn: quinn::Connecting,
-        session: Arc<RwLock<message::Session>>,
-    ) -> Result<()> {
-        let connection = conn.await.context("Failed to establish connection")?;
-        let remote_addr = connection.remote_address();
-        info!("New connection from {}", remote_addr);
+    async fn handle_incoming_connections(
+        endpoint: Endpoint,
+        peers: Arc<RwLock<HashMap<String, Connection>>>,
+        server_id: String,
+    ) {
+        while let Some(conn) = endpoint.accept().await {
+            let connection = match conn.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("连接失败: {}", e);
+                    continue;
+                }
+            };
 
-        // 处理双向流
+            let remote_addr = connection.remote_address();
+            info!("新连接来自: {}", remote_addr);
+
+            let peers = Arc::clone(&peers);
+            let server_id = server_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection(connection, peers, server_id).await {
+                    error!("处理连接错误: {}", e);
+                }
+            });
+        }
+    }
+
+    async fn handle_connection(
+        connection: Connection,
+        peers: Arc<RwLock<HashMap<String, Connection>>>,
+        local_server_id: String,
+    ) -> Result<()> {
+        let remote_addr = connection.remote_address();
+        let mut peer_id = None;
+
         loop {
-            tokio::select! {
-                stream = connection.accept_bi() => {
-                    match stream {
-                        Ok((mut send, mut recv)) => {
-                            let session = Arc::clone(&session);
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_stream(&mut send, &mut recv, session).await {
-                                    warn!("Stream error: {}", e);
+            match connection.accept_uni().await {
+                Ok(mut recv) => {
+                    match Self::receive_message(&mut recv).await {
+                        Ok(message) => {
+                            match &message.message_type {
+                                MessageType::Hello { server_id } => {
+                                    info!("服务器 {} 加入", server_id);
+                                    println!("📥 服务器 '{}' 加入聊天室", server_id);
+                                    
+                                    peer_id = Some(server_id.clone());
+                                    peers.write().await.insert(server_id.clone(), connection.clone());
+                                    
+                                    let welcome = Message::new(
+                                        local_server_id.clone(),
+                                        MessageType::Welcome { server_id: local_server_id.clone() }
+                                    );
+                                    let _ = Self::send_message(&connection, welcome).await;
                                 }
-                            });
+                                MessageType::Welcome { server_id } => {
+                                    println!("✅ 收到服务器 '{}' 的欢迎", server_id);
+                                }
+                                MessageType::Text { content } => {
+                                    let display = message.format_display();
+                                    if !display.is_empty() {
+                                        println!("{}", display);
+                                    }
+                                }
+                                MessageType::Ping => {
+                                    let pong = Message::new(local_server_id.clone(), MessageType::Pong);
+                                    let _ = Self::send_message(&connection, pong).await;
+                                }
+                                MessageType::Pong => {
+                                    // 心跳响应，不需要处理
+                                }
+                            }
                         }
                         Err(e) => {
-                            error!("Failed to accept stream: {}", e);
+                            warn!("接收消息失败 from {}: {}", remote_addr, e);
                             break;
                         }
                     }
                 }
-                _ = connection.closed() => {
-                    info!("Connection {} closed", remote_addr);
+                Err(e) => {
+                    warn!("接受流失败 from {}: {}", remote_addr, e);
                     break;
                 }
             }
         }
 
-        Ok(())
-    }
-
-    /// 处理数据流
-    async fn handle_stream(
-        send: &mut quinn::SendStream,
-        recv: &mut quinn::RecvStream,
-        session: Arc<RwLock<message::Session>>,
-    ) -> Result<()> {
-        // 读取消息
-        let buffer = recv.read_to_end(10 * 1024 * 1024).await
-            .context("Failed to read stream")?;
-
-        if buffer.is_empty() {
-            return Ok(());
-        }
-
-        // 解析消息
-        let message = message::Message::from_bytes(&buffer)
-            .context("Failed to parse message")?;
-
-        info!("Received message from {}: {:?}", message.sender, message.message_type);
-
-        // 处理消息
-        let response = Self::process_message(message, &session).await?;
-
-        // 发送响应
-        if let Some(response_msg) = response {
-            let response_bytes = response_msg.to_bytes()
-                .context("Failed to serialize response")?;
-            send.write_all(&response_bytes).await
-                .context("Failed to send response")?;
-            send.finish().await
-                .context("Failed to finish sending")?;
+        if let Some(id) = peer_id {
+            peers.write().await.remove(&id);
+            println!("📤 服务器 '{}' 离开聊天室", id);
         }
 
         Ok(())
     }
 
-    /// 处理接收到的消息
-    async fn process_message(
-        message: message::Message,
-        session: &Arc<RwLock<message::Session>>,
-    ) -> Result<Option<message::Message>> {
-        match &message.message_type {
-            message::MessageType::Text(text) => {
-                info!("Text message from {}: {}", message.sender, text);
-                
-                // 广播消息给所有连接的用户
-                Self::broadcast_message(&message, session).await?;
-                
-                // 返回确认消息
-                let mut session_lock = session.write().await;
-                let response_id = session_lock.next_message_id();
-                Ok(Some(message::Message::new(
-                    response_id,
-                    "server".to_string(),
-                    message::MessageType::Text("Message received".to_string()),
-                )))
+    async fn handle_user_input(
+        peers: Arc<RwLock<HashMap<String, Connection>>>,
+        server_id: String,
+    ) {
+        let stdin = tokio::io::stdin();
+        let mut lines = BufReader::new(stdin).lines();
+        
+        while let Ok(Some(line)) = lines.next_line().await {
+            let input = line.trim();
+            
+            if input == "/quit" {
+                info!("服务器退出");
+                std::process::exit(0);
             }
-            message::MessageType::UserJoined(username) => {
-                info!("User {} joined", username);
-                Ok(None)
+            
+            if input.is_empty() {
+                continue;
             }
-            message::MessageType::UserLeft(username) => {
-                info!("User {} left", username);
-                let mut session_lock = session.write().await;
-                session_lock.remove_user(username);
-                Ok(None)
-            }
-            message::MessageType::Ping => {
-                // 响应心跳
-                let mut session_lock = session.write().await;
-                let response_id = session_lock.next_message_id();
-                Ok(Some(message::Message::new(
-                    response_id,
-                    "server".to_string(),
-                    message::MessageType::Pong,
-                )))
-            }
-            _ => {
-                warn!("Unhandled message type: {:?}", message.message_type);
-                Ok(None)
-            }
-        }
-    }
-
-    /// 广播消息给所有连接的用户
-    async fn broadcast_message(
-        message: &message::Message,
-        session: &Arc<RwLock<message::Session>>,
-    ) -> Result<()> {
-        let session_lock = session.read().await;
-        let message_bytes = message.to_bytes()?;
-
-        for (username, connection) in &session_lock.users {
-            if username != &message.sender {
-                match connection.open_uni().await {
-                    Ok(mut stream) => {
-                        if let Err(e) = stream.write_all(&message_bytes).await {
-                            warn!("Failed to send message to {}: {}", username, e);
-                        } else if let Err(e) = stream.finish().await {
-                            warn!("Failed to finish sending to {}: {}", username, e);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to open stream to {}: {}", username, e);
+            
+            let message = Message::new(
+                server_id.clone(),
+                MessageType::Text { content: input.to_string() }
+            );
+            
+            let peers_read = peers.read().await;
+            if peers_read.is_empty() {
+                println!("⚠️  没有连接的服务器");
+            } else {
+                println!("📤 发送消息给 {} 个服务器", peers_read.len());
+                for (peer_id, connection) in peers_read.iter() {
+                    if let Err(e) = Self::send_message(connection, message.clone()).await {
+                        error!("发送消息到 {} 失败: {}", peer_id, e);
                     }
                 }
             }
         }
+    }
 
+    async fn send_message(connection: &Connection, message: Message) -> Result<()> {
+        let mut send = connection.open_uni().await
+            .context("Failed to open stream")?;
+        
+        let data = message.to_bytes()?;
+        send.write_all(&data).await
+            .context("Failed to send message")?;
+        
+        send.finish().await
+            .context("Failed to finish stream")?;
+        
         Ok(())
     }
 
-    /// 获取服务器统计信息
-    pub async fn get_stats(&self) -> Result<String> {
-        let session = self.session.read().await;
-        Ok(format!(
-            "Connected users: {}\nTotal messages: {}",
-            session.get_user_count(),
-            session.message_counter
-        ))
+    async fn receive_message(recv: &mut quinn::RecvStream) -> Result<Message> {
+        let data = recv.read_to_end(8192).await
+            .context("Failed to read message")?;
+        
+        Message::from_bytes(&data)
     }
 }

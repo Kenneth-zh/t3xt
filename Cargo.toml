@@ -2,6 +2,8 @@
 name = "t3xt"
 version = "0.1.0"
 edition = "2021"
+authors = ["292"]
+description = "基于QUIC协议的P2P即时通信软件"
 
 [dependencies]
 quinn = "0.10"
@@ -15,4 +17,5 @@ serde_json = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }

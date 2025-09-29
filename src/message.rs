@@ -4,7 +4,6 @@ use chrono::{DateTime, Utc};
 /// 极简消息类型 - 只保留核心功能
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageType {
-    /// 文本消息 - 唯一的消息类型
     Text { content: String },
 }
 

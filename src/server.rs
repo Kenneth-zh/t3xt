@@ -37,7 +37,7 @@ impl Server {
     }
 
     pub async fn run(&self) -> Result<()> {
-        println!("🚀 服务器 '{}' 启动在端口 {}", self.server_id, self.port);
+        println!("服务器 '{}' 启动在端口 {}", self.server_id, self.port);
         println!("等待客户端连接...");
         println!("输入消息开始广播，输入 '/quit' 退出");
         println!("─────────────────────────────");
@@ -83,7 +83,7 @@ impl Server {
                 let mut peers_guard = peers.write().await;
                 peers_guard.push(connection.clone());
             }
-            println!("📥 新客户端连接: {}", remote_addr);
+            println!("新客户端连接: {}", remote_addr);
 
             // 启动处理该连接的任务
             let peers = Arc::clone(&peers);
@@ -109,7 +109,7 @@ impl Server {
                             // 只处理文本消息
                             match &message.message_type {
                                 MessageType::Text { content } => {
-                                    println!("📩 [{}]: {}", message.sender_id, content);
+                                    println!("[{}]: {}", message.sender_id, content);
 
                                     // 广播给其他连接的客户端（不包括发送者）
                                     let peers_read = peers.read().await;
@@ -132,13 +132,12 @@ impl Server {
                 }
             }
         }
-
-        // 清理断开的连接
+        
         {
             let mut peers_guard = peers.write().await;
             peers_guard.retain(|conn| conn.remote_address().to_string() != peer_addr);
         }
-        println!("📤 客户端 '{}' 断开连接", peer_addr);
+        println!("客户端 '{}' 断开连接", peer_addr);
 
         Ok(())
     }
@@ -168,7 +167,7 @@ impl Server {
             if peers_read.is_empty() {
                 println!("没有连接的客户端");
             } else {
-                println!("📤 发送消息给 {} 个客户端", peers_read.len());
+                println!("发送消息给 {} 个客户端", peers_read.len());
                 for connection in peers_read.iter() {
                     if let Err(e) = Self::send_message(connection, message.clone()).await {
                         warn!("发送消息失败: {}", e);

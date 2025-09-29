@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tracing_subscriber::{FmtSubscriber};
 
 mod client;
 mod crypto;
@@ -43,6 +44,20 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+
+    /*
+    let file_appender = tracing_appender::rolling::daily("./logs", "t3xt.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let subscriber = FmtSubscriber::builder()
+        .with_writer(non_blocking) // 日志写到文件
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed");
+    */
+    
     let cli = Cli::parse();
     
     match cli.command {

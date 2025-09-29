@@ -16,16 +16,18 @@ pub struct Client {
 
 impl Client {
     pub fn new(client_id: String) -> Result<Self> {
-        if !std::path::Path::new("certs/server.crt").exists() {
+        let cert_path = std::path::Path::new("certs/server.crt");
+        if !cert_path.exists() {
             return Err(anyhow::anyhow!(
-                "证书文件 'certs/server.crt' 不存在。请先启动服务器以生成证书。"
+                "certs/server.crt not found."
             ));
         }
 
-        println!("🔐 使用服务器证书进行安全连接");
-        let rustls_config = crypto::create_client_config_with_cert("certs/server.crt")?;
+        println!("found cert");   
+        let rustls_config = crypto::create_client_config_with_cert(cert_path)?;
         let client_config = crypto::create_quinn_client_config(rustls_config);
 
+        // 如果你有多网卡或需要指定出口IP，可以将 "0.0.0.0" 替换为具体的本地IP。
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
 
@@ -40,16 +42,14 @@ impl Client {
         let addr: SocketAddr = format!("{}:{}", server_addr, port).parse()
             .context("Invalid server address")?;
         
-        info!("连接到服务器: {}", addr);
-        println!("🔗 正在连接到服务器 {}...", addr);
-        
+        info!("connect to {}", addr);
+        println!("connecting to {}...", addr);
+
         let connection = self.endpoint
             .connect(addr, "localhost")?
             .await
             .context("Failed to establish connection")?;
-        
-        info!("连接成功: {}", connection.remote_address());
-        println!("✅ 连接成功！");
+        println!("connected");
         
         self.connection = Some(connection);
         Ok(())
@@ -59,7 +59,7 @@ impl Client {
         if let Some(connection) = &self.connection {
             connection.close(0u32.into(), b"Goodbye");
             self.connection = None;
-            println!("👋 已断开连接");
+            println!("disconnected");
         }
         Ok(())
     }

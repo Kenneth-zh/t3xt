@@ -99,7 +99,7 @@ pub fn create_server_config(cert_config: CertConfig) -> Result<RustlsServerConfi
     Ok(config)
 }
 
-pub fn create_client_config_with_cert(cert_path: &str) -> Result<RustlsClientConfig> {
+pub fn create_client_config_with_cert(cert_path: &Path) -> Result<RustlsClientConfig> {
     let cert_pem = fs::read_to_string(cert_path)
         .context("Failed to read certificate file")?;
     

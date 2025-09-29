@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use quinn::{ClientConfig, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, TransportConfig};
 use rustls::{Certificate, ClientConfig as RustlsClientConfig, PrivateKey, ServerConfig as RustlsServerConfig};
 use std::{fs, path::Path, sync::Arc, time::Duration};
 
@@ -74,7 +74,7 @@ impl CertConfig {
         Ok(Self {
             cert: Certificate(cert_der),
             key: PrivateKey(key_der),
-            cert_pem,
+            cert_pem: cert_pem.clone(),
         })
     }
     
@@ -95,15 +95,6 @@ pub fn create_server_config(cert_config: CertConfig) -> Result<RustlsServerConfi
         .with_no_client_auth()
         .with_single_cert(vec![cert_config.cert], cert_config.key)
         .context("Failed to create server config")?;
-    
-    Ok(config)
-}
-
-pub fn create_insecure_client_config() -> Result<RustlsClientConfig> {
-    let config = RustlsClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
     
     Ok(config)
 }
@@ -140,6 +131,7 @@ pub fn create_quinn_client_config(rustls_config: RustlsClientConfig) -> ClientCo
     config
 }
 
+/* 
 struct SkipServerVerification;
 
 impl rustls::client::ServerCertVerifier for SkipServerVerification {
@@ -155,3 +147,4 @@ impl rustls::client::ServerCertVerifier for SkipServerVerification {
         Ok(rustls::client::ServerCertVerified::assertion())
     }
 }
+    */

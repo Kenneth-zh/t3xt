@@ -19,9 +19,7 @@ impl Client {
             let rustls_config = crypto::create_client_config_with_cert("certs/server.crt")?;
             crypto::create_quinn_client_config(rustls_config)
         } else {
-            println!("⚠️  使用不安全模式连接（跳过证书验证）");
-            let rustls_config = crypto::create_insecure_client_config()?;
-            crypto::create_quinn_client_config(rustls_config)
+            return Err(anyhow::anyhow!("未找到服务器证书 'certs/server.crt'，请确保该文件存在以建立安全连接"));
         };
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;

@@ -3,7 +3,7 @@ name = "t3xt"
 version = "0.1.0"
 edition = "2021"
 authors = ["292"]
-description = "基于QUIC协议的P2P即时通信软件"
+description = "text messaging over quic"
 
 [dependencies]
 quinn = "0.10"

@@ -166,7 +166,7 @@ impl Server {
             
             let peers_read = peers.read().await;
             if peers_read.is_empty() {
-                println!("⚠️  没有连接的客户端");
+                println!("没有连接的客户端");
             } else {
                 println!("📤 发送消息给 {} 个客户端", peers_read.len());
                 for connection in peers_read.iter() {

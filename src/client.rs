@@ -6,7 +6,7 @@ use tokio::{
     io::{AsyncBufReadExt, BufReader},
     sync::mpsc,
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub struct Client {
     client_id: String,
@@ -65,37 +65,34 @@ impl Client {
     }
 
     pub async fn run_interactive(&mut self) -> Result<()> {
-        let connection = self.connection.as_ref()
-            .context("Not connected to server")?;
-        
+
+        // 为信息队列准备
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         
-        // 启动消息接收任务
-        let recv_connection = connection.clone();
+        let recv_connection = self.connection.as_ref().unwrap().clone();
         let recv_task = tokio::spawn(async move {
-            loop {
-                match recv_connection.accept_uni().await {
-                    Ok(mut recv) => {
-                        match Self::receive_message(&mut recv).await {
+            loop{
+                match recv_connection.accept_uni().await{
+                    Ok(mut recvstream) => {
+                        match Self::receive_message(&mut recvstream).await{
                             Ok(message) => {
                                 println!("{}", message.format_display());
                             }
                             Err(e) => {
-                                warn!("接收消息失败: {}", e);
+                                warn!("Failed to receive message: {}", e);
                                 break;
-                            }
                         }
                     }
-                    Err(e) => {
-                        warn!("接受流失败: {}", e);
+                    }  
+                    Err(_) => {
                         break;
                     }
+                    }
                 }
-            }
+            
         });
         
-        // 消息发送任务
-        let send_connection = connection.clone();
+        let send_connection = self.connection.as_ref().unwrap().clone();
         let send_task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 if Self::send_message(&send_connection, message).await.is_err() {
@@ -105,7 +102,7 @@ impl Client {
         });
         
         // 用户输入处理
-        println!("💬 开始聊天！输入消息并按回车发送，输入 '/quit' 退出");
+        println!("输入消息并按回车发送，输入 '/quit' 退出");
         println!("─────────────────────────────────────");
         
         let stdin = tokio::io::stdin();

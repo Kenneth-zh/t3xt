@@ -1,10 +1,9 @@
 use crate::{crypto, message::*};
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint, ServerConfig};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 use tokio::{io::{AsyncBufReadExt, BufReader}, sync::RwLock};
 use tracing::{error, info, warn};
-
 
 pub struct Server {
     server_id: String,
@@ -39,7 +38,7 @@ impl Server {
 
     pub async fn run(&self) -> Result<()> {
         println!("🚀 服务器 '{}' 启动在端口 {}", self.server_id, self.port);
-        println!("等待其他服务器连接...");
+        println!("等待客户端连接...");
         println!("输入消息开始广播，输入 '/quit' 退出");
         println!("─────────────────────────────");
 
@@ -79,19 +78,20 @@ impl Server {
             let remote_addr = connection.remote_address();
             info!("新连接来自: {}", remote_addr);
             
-            let peer_id = remote_addr.to_string();
-
             // 将连接加入 peers
             {
                 let mut peers_guard = peers.write().await;
                 peers_guard.push(connection.clone());
             }
-            println!("📥 新客户端连接: {}", peer_id);
+            println!("📥 新客户端连接: {}", remote_addr);
 
-            // 启动处理该连接的任务（这里只是简单地打印连接信息）
+            // 启动处理该连接的任务
+            let peers = Arc::clone(&peers);
+            let peer_addr = remote_addr.to_string();
             tokio::spawn(async move {
-                // 这里可以扩展为处理消息等逻辑
-                info!("处理来自 {} 的连接", peer_id);
+                if let Err(e) = Self::handle_connection(connection, peers, peer_addr).await {
+                    error!("处理连接错误: {}", e);
+                }
             });
         }
     }
@@ -99,66 +99,52 @@ impl Server {
     async fn handle_connection(
         connection: Connection,
         peers: Arc<RwLock<Vec<Connection>>>,
-        _local_server_id: String,
-        peer_id: String,
+        peer_addr: String,
     ) -> Result<()> {
-        let remote_addr = connection.remote_address();
-
         loop {
             match connection.accept_uni().await {
                 Ok(mut recv) => {
                     match Self::receive_message(&mut recv).await {
                         Ok(message) => {
+                            // 只处理文本消息
                             match &message.message_type {
                                 MessageType::Text { content } => {
                                     println!("📩 [{}]: {}", message.sender_id, content);
 
-                                    // 广播给其他连接的客户端
+                                    // 广播给其他连接的客户端（不包括发送者）
                                     let peers_read = peers.read().await;
                                     for other_conn in peers_read.iter() {
-                                        // 不给自己发
-                                        if other_conn.remote_address().to_string() != peer_id {
+                                        if other_conn.remote_address().to_string() != peer_addr {
                                             let _ = Self::send_message(other_conn, message.clone()).await;
                                         }
                                     }
                                 }
-                                MessageType::Pong => {
-                                    // 收到心跳响应，连接正常
-                                }
-                                MessageType::Ping => {
-                                    // 回复心跳
-                                    let pong = Message::new(
-                                        "server".to_string(),
-                                        MessageType::Pong
-                                    );
-                                    let _ = Self::send_message(&connection, pong).await;
-                                }
                             }
                         }
                         Err(e) => {
-                            warn!("解析消息失败 from {}: {}", remote_addr, e);
+                            warn!("解析消息失败 from {}: {}", peer_addr, e);
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("接受流失败 from {}: {}", remote_addr, e);
+                    warn!("接受流失败 from {}: {}", peer_addr, e);
                     break;
                 }
             }
         }
 
-        // 清理连接
+        // 清理断开的连接
         {
             let mut peers_guard = peers.write().await;
-            peers_guard.retain(|conn| conn.remote_address().to_string() != peer_id);
+            peers_guard.retain(|conn| conn.remote_address().to_string() != peer_addr);
         }
-        println!("📤 客户端 '{}' 离开聊天室", peer_id);
+        println!("📤 客户端 '{}' 断开连接", peer_addr);
 
         Ok(())
     }
 
     async fn handle_user_input(
-        peers: Arc<RwLock<HashMap<String, Connection>>>,
+        peers: Arc<RwLock<Vec<Connection>>>,
         server_id: String,
     ) {
         let stdin = tokio::io::stdin();
@@ -176,17 +162,14 @@ impl Server {
                 continue;
             }
             
-            let message = Message::new(
-                server_id.clone(),
-                MessageType::Text { content: input.to_string() }
-            );
+            let message = Message::new_text(server_id.clone(), input.to_string());
             
             let peers_read = peers.read().await;
             if peers_read.is_empty() {
                 println!("⚠️  没有连接的客户端");
             } else {
                 println!("📤 发送消息给 {} 个客户端", peers_read.len());
-                for (_peer_id, connection) in peers_read.iter() {
+                for connection in peers_read.iter() {
                     if let Err(e) = Self::send_message(connection, message.clone()).await {
                         warn!("发送消息失败: {}", e);
                     }

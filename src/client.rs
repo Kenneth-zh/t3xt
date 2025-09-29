@@ -1,11 +1,10 @@
 use crate::{crypto, message::*};
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     sync::mpsc,
-    time::sleep,
 };
 use tracing::{error, info, warn};
 
@@ -17,7 +16,6 @@ pub struct Client {
 
 impl Client {
     pub fn new(client_id: String) -> Result<Self> {
-        // 检查证书文件是否存在
         if !std::path::Path::new("certs/server.crt").exists() {
             return Err(anyhow::anyhow!(
                 "证书文件 'certs/server.crt' 不存在。请先启动服务器以生成证书。"
@@ -51,7 +49,7 @@ impl Client {
             .context("Failed to establish connection")?;
         
         info!("连接成功: {}", connection.remote_address());
-        println!("✅ 连接成功！准备开始聊天...");
+        println!("✅ 连接成功！");
         
         self.connection = Some(connection);
         Ok(())
@@ -70,7 +68,7 @@ impl Client {
         let connection = self.connection.as_ref()
             .context("Not connected to server")?;
         
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         
         // 启动消息接收任务
         let recv_connection = connection.clone();
@@ -80,17 +78,7 @@ impl Client {
                     Ok(mut recv) => {
                         match Self::receive_message(&mut recv).await {
                             Ok(message) => {
-                                if message.is_text_message() {
-                                    println!("{}", message.format_display());
-                                }
-                                
-                                // 处理心跳
-                                if matches!(message.message_type, MessageType::Ping) {
-                                    let pong = Message::new("client".to_string(), MessageType::Pong);
-                                    if tx.send(pong).is_err() {
-                                        break;
-                                    }
-                                }
+                                println!("{}", message.format_display());
                             }
                             Err(e) => {
                                 warn!("接收消息失败: {}", e);
@@ -102,19 +90,6 @@ impl Client {
                         warn!("接受流失败: {}", e);
                         break;
                     }
-                }
-            }
-        });
-        
-        // 启动心跳任务
-        let heartbeat_tx = tx.clone();
-        let heartbeat_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(15));
-            loop {
-                interval.tick().await;
-                let ping = Message::new("client".to_string(), MessageType::Ping);
-                if heartbeat_tx.send(ping).is_err() {
-                    break;
                 }
             }
         });
@@ -147,10 +122,7 @@ impl Client {
                 continue;
             }
             
-            let message = Message::new(
-                self.client_id.clone(),
-                MessageType::Text { content: input.to_string() }
-            );
+            let message = Message::new_text(self.client_id.clone(), input.to_string());
             
             if tx.send(message).is_err() {
                 break;
@@ -159,7 +131,6 @@ impl Client {
         
         // 清理任务
         recv_task.abort();
-        heartbeat_task.abort();
         send_task.abort();
         
         Ok(())

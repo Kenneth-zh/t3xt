@@ -1,15 +1,16 @@
 use crate::{crypto, message::*};
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint, ServerConfig};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 use tokio::{io::{AsyncBufReadExt, BufReader}, sync::RwLock};
 use tracing::{error, info, warn};
+
 
 pub struct Server {
     server_id: String,
     port: u16,
     endpoint: Endpoint,
-    peers: Arc<RwLock<HashMap<String, Connection>>>,
+    peers: Arc<RwLock<Vec<Connection>>>,
 }
 
 impl Server {
@@ -32,7 +33,7 @@ impl Server {
             server_id,
             port,
             endpoint,
-            peers: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -45,9 +46,8 @@ impl Server {
         let accept_task = {
             let endpoint = self.endpoint.clone();
             let peers = Arc::clone(&self.peers);
-            let server_id = self.server_id.clone();
             tokio::spawn(async move {
-                Self::handle_incoming_connections(endpoint, peers, server_id).await;
+                Self::handle_incoming_connections(endpoint, peers).await;
             })
         };
 
@@ -65,8 +65,7 @@ impl Server {
 
     async fn handle_incoming_connections(
         endpoint: Endpoint,
-        peers: Arc<RwLock<HashMap<String, Connection>>>,
-        server_id: String,
+        peers: Arc<RwLock<Vec<Connection>>>,
     ) {
         while let Some(conn) = endpoint.accept().await {
             let connection = match conn.await {
@@ -79,24 +78,31 @@ impl Server {
 
             let remote_addr = connection.remote_address();
             info!("新连接来自: {}", remote_addr);
+            
+            let peer_id = remote_addr.to_string();
 
-            let peers = Arc::clone(&peers);
-            let server_id = server_id.clone();
+            // 将连接加入 peers
+            {
+                let mut peers_guard = peers.write().await;
+                peers_guard.push(connection.clone());
+            }
+            println!("📥 新客户端连接: {}", peer_id);
+
+            // 启动处理该连接的任务（这里只是简单地打印连接信息）
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(connection, peers, server_id).await {
-                    error!("处理连接错误: {}", e);
-                }
+                // 这里可以扩展为处理消息等逻辑
+                info!("处理来自 {} 的连接", peer_id);
             });
         }
     }
 
     async fn handle_connection(
         connection: Connection,
-        peers: Arc<RwLock<HashMap<String, Connection>>>,
-        local_server_id: String,
+        peers: Arc<RwLock<Vec<Connection>>>,
+        _local_server_id: String,
+        peer_id: String,
     ) -> Result<()> {
         let remote_addr = connection.remote_address();
-        let mut peer_id = None;
 
         loop {
             match connection.accept_uni().await {
@@ -104,40 +110,33 @@ impl Server {
                     match Self::receive_message(&mut recv).await {
                         Ok(message) => {
                             match &message.message_type {
-                                MessageType::Hello { server_id } => {
-                                    info!("服务器 {} 加入", server_id);
-                                    println!("📥 服务器 '{}' 加入聊天室", server_id);
-                                    
-                                    peer_id = Some(server_id.clone());
-                                    peers.write().await.insert(server_id.clone(), connection.clone());
-                                    
-                                    let welcome = Message::new(
-                                        local_server_id.clone(),
-                                        MessageType::Welcome { server_id: local_server_id.clone() }
-                                    );
-                                    let _ = Self::send_message(&connection, welcome).await;
-                                }
-                                MessageType::Welcome { server_id } => {
-                                    println!("✅ 收到服务器 '{}' 的欢迎", server_id);
-                                }
                                 MessageType::Text { content } => {
-                                    let display = message.format_display();
-                                    if !display.is_empty() {
-                                        println!("{}", display);
+                                    println!("📩 [{}]: {}", message.sender_id, content);
+
+                                    // 广播给其他连接的客户端
+                                    let peers_read = peers.read().await;
+                                    for other_conn in peers_read.iter() {
+                                        // 不给自己发
+                                        if other_conn.remote_address().to_string() != peer_id {
+                                            let _ = Self::send_message(other_conn, message.clone()).await;
+                                        }
                                     }
                                 }
-                                MessageType::Ping => {
-                                    let pong = Message::new(local_server_id.clone(), MessageType::Pong);
-                                    let _ = Self::send_message(&connection, pong).await;
-                                }
                                 MessageType::Pong => {
-                                    // 心跳响应，不需要处理
+                                    // 收到心跳响应，连接正常
+                                }
+                                MessageType::Ping => {
+                                    // 回复心跳
+                                    let pong = Message::new(
+                                        "server".to_string(),
+                                        MessageType::Pong
+                                    );
+                                    let _ = Self::send_message(&connection, pong).await;
                                 }
                             }
                         }
                         Err(e) => {
-                            warn!("接收消息失败 from {}: {}", remote_addr, e);
-                            break;
+                            warn!("解析消息失败 from {}: {}", remote_addr, e);
                         }
                     }
                 }
@@ -148,10 +147,12 @@ impl Server {
             }
         }
 
-        if let Some(id) = peer_id {
-            peers.write().await.remove(&id);
-            println!("📤 服务器 '{}' 离开聊天室", id);
+        // 清理连接
+        {
+            let mut peers_guard = peers.write().await;
+            peers_guard.retain(|conn| conn.remote_address().to_string() != peer_id);
         }
+        println!("📤 客户端 '{}' 离开聊天室", peer_id);
 
         Ok(())
     }
@@ -182,12 +183,12 @@ impl Server {
             
             let peers_read = peers.read().await;
             if peers_read.is_empty() {
-                println!("⚠️  没有连接的服务器");
+                println!("⚠️  没有连接的客户端");
             } else {
-                println!("📤 发送消息给 {} 个服务器", peers_read.len());
-                for (peer_id, connection) in peers_read.iter() {
+                println!("📤 发送消息给 {} 个客户端", peers_read.len());
+                for (_peer_id, connection) in peers_read.iter() {
                     if let Err(e) = Self::send_message(connection, message.clone()).await {
-                        error!("发送消息到 {} 失败: {}", peer_id, e);
+                        warn!("发送消息失败: {}", e);
                     }
                 }
             }

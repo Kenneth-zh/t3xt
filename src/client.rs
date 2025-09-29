@@ -1,143 +1,138 @@
 use crate::{crypto, message::*};
 use anyhow::{Context, Result};
-use quinn::{ClientConfig, Connection, Endpoint};
-use std::sync::Arc;
-use tokio::{io::{AsyncBufReadExt, BufReader}, time::{sleep, Duration}};
+use quinn::{Connection, Endpoint};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::mpsc,
+    time::sleep,
+};
 use tracing::{error, info, warn};
 
 pub struct Client {
-    server_id: String,
+    client_id: String,
     endpoint: Endpoint,
     connection: Option<Connection>,
 }
 
 impl Client {
     pub fn new(client_id: String) -> Result<Self> {
-        // 尝试使用服务器证书，如果不存在则使用不安全模式
-        let client_config = if std::path::Path::new("certs/server.crt").exists() {
-            println!("🔐 使用服务器证书进行安全连接");
-            let rustls_config = crypto::create_client_config_with_cert("certs/server.crt")?;
-            crypto::create_quinn_client_config(rustls_config)
-        } else {
-            return Err(anyhow::anyhow!("未找到服务器证书 'certs/server.crt'，请确保该文件存在以建立安全连接"));
-        };
+        // 检查证书文件是否存在
+        if !std::path::Path::new("certs/server.crt").exists() {
+            return Err(anyhow::anyhow!(
+                "证书文件 'certs/server.crt' 不存在。请先启动服务器以生成证书。"
+            ));
+        }
+
+        println!("🔐 使用服务器证书进行安全连接");
+        let rustls_config = crypto::create_client_config_with_cert("certs/server.crt")?;
+        let client_config = crypto::create_quinn_client_config(rustls_config);
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
 
         Ok(Self {
-            server_id: client_id,
+            client_id,
             endpoint,
             connection: None,
         })
     }
 
-    pub async fn connect(&mut self, target_addr: &str, target_port: u16) -> Result<()> {
-        let addr = format!("{}:{}", target_addr, target_port);
+    pub async fn connect(&mut self, server_addr: &str, port: u16) -> Result<()> {
+        let addr: SocketAddr = format!("{}:{}", server_addr, port).parse()
+            .context("Invalid server address")?;
         
-        println!("正在连接到服务器 {}...", addr);
-        info!("Connecting to server at {}", addr);
-
-        let connection = self
-            .endpoint
-            .connect(addr.parse()?, "localhost")?
+        info!("连接到服务器: {}", addr);
+        println!("🔗 正在连接到服务器 {}...", addr);
+        
+        let connection = self.endpoint
+            .connect(addr, "localhost")?
             .await
-            .context("Failed to connect to server")?;
-
-        println!("✅ 成功连接到服务器！");
-
-        // 发送Hello消息
-        let hello_msg = Message::new(
-            self.server_id.clone(),
-            MessageType::Hello { server_id: self.server_id.clone() },
-        );
-
-        Self::send_message(&connection, hello_msg).await?;
+            .context("Failed to establish connection")?;
+        
+        info!("连接成功: {}", connection.remote_address());
+        println!("✅ 连接成功！准备开始聊天...");
+        
         self.connection = Some(connection);
-
         Ok(())
     }
 
-    pub async fn run_interactive(&self) -> Result<()> {
+    pub async fn disconnect(&mut self) -> Result<()> {
+        if let Some(connection) = &self.connection {
+            connection.close(0u32.into(), b"Goodbye");
+            self.connection = None;
+            println!("👋 已断开连接");
+        }
+        Ok(())
+    }
+
+    pub async fn run_interactive(&mut self) -> Result<()> {
         let connection = self.connection.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("未连接到服务器"))?;
-
-        println!("📝 连接成功！可以开始发送消息，输入 '/quit' 退出");
-        println!("─────────────────────────────");
+            .context("Not connected to server")?;
         
-        // 启动接收消息的任务
-        let recv_task = {
-            let connection = connection.clone();
-            tokio::spawn(async move {
-                Self::handle_incoming_messages(connection).await;
-            })
-        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
         
-        // 启动用户输入任务
-        let input_task = {
-            let connection = connection.clone();
-            let server_id = self.server_id.clone();
-            tokio::spawn(async move {
-                Self::handle_user_input(connection, server_id).await;
-            })
-        };
-
-        // 启动心跳任务
-        let ping_task = {
-            let connection = connection.clone();
-            let server_id = self.server_id.clone();
-            tokio::spawn(async move {
-                Self::send_ping_periodically(connection, server_id).await;
-            })
-        };
-
-        let _ = tokio::try_join!(recv_task, input_task, ping_task);
-        Ok(())
-    }
-
-    async fn handle_incoming_messages(connection: Connection) {
-        loop {
-            match connection.accept_uni().await {
-                Ok(mut recv) => {
-                    match Self::receive_message(&mut recv).await {
-                        Ok(message) => {
-                            match &message.message_type {
-                                MessageType::Welcome { server_id } => {
-                                    println!("🎉 收到服务器 '{}' 的欢迎消息", server_id);
+        // 启动消息接收任务
+        let recv_connection = connection.clone();
+        let recv_task = tokio::spawn(async move {
+            loop {
+                match recv_connection.accept_uni().await {
+                    Ok(mut recv) => {
+                        match Self::receive_message(&mut recv).await {
+                            Ok(message) => {
+                                if message.is_text_message() {
+                                    println!("{}", message.format_display());
                                 }
-                                MessageType::Text { content: _ } => {
-                                    let display = message.format_display();
-                                    if !display.is_empty() {
-                                        println!("{}", display);
+                                
+                                // 处理心跳
+                                if matches!(message.message_type, MessageType::Ping) {
+                                    let pong = Message::new("client".to_string(), MessageType::Pong);
+                                    if tx.send(pong).is_err() {
+                                        break;
                                     }
                                 }
-                                MessageType::Ping => {
-                                    // 接收到ping，发送pong
-                                    let pong = Message::new("client".to_string(), MessageType::Pong);
-                                    let _ = Self::send_message(&connection, pong).await;
-                                }
-                                MessageType::Pong => {
-                                    // 收到心跳响应
-                                    info!("收到心跳响应");
-                                }
-                                _ => {}
+                            }
+                            Err(e) => {
+                                warn!("接收消息失败: {}", e);
+                                break;
                             }
                         }
-                        Err(e) => {
-                            warn!("接收消息失败: {}", e);
-                            break;
-                        }
+                    }
+                    Err(e) => {
+                        warn!("接受流失败: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    warn!("接受流失败: {}", e);
+            }
+        });
+        
+        // 启动心跳任务
+        let heartbeat_tx = tx.clone();
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                let ping = Message::new("client".to_string(), MessageType::Ping);
+                if heartbeat_tx.send(ping).is_err() {
                     break;
                 }
             }
-        }
-    }
-
-    async fn handle_user_input(connection: Connection, server_id: String) {
+        });
+        
+        // 消息发送任务
+        let send_connection = connection.clone();
+        let send_task = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if Self::send_message(&send_connection, message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        
+        // 用户输入处理
+        println!("💬 开始聊天！输入消息并按回车发送，输入 '/quit' 退出");
+        println!("─────────────────────────────────────");
+        
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
         
@@ -145,8 +140,7 @@ impl Client {
             let input = line.trim();
             
             if input == "/quit" {
-                info!("客户端退出");
-                std::process::exit(0);
+                break;
             }
             
             if input.is_empty() {
@@ -154,29 +148,21 @@ impl Client {
             }
             
             let message = Message::new(
-                server_id.clone(),
+                self.client_id.clone(),
                 MessageType::Text { content: input.to_string() }
             );
             
-            if let Err(e) = Self::send_message(&connection, message).await {
-                error!("发送消息失败: {}", e);
-            } else {
-                println!("✅ 消息已发送");
-            }
-        }
-    }
-
-    async fn send_ping_periodically(connection: Connection, server_id: String) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        
-        loop {
-            interval.tick().await;
-            let ping = Message::new(server_id.clone(), MessageType::Ping);
-            if let Err(e) = Self::send_message(&connection, ping).await {
-                error!("发送心跳失败: {}", e);
+            if tx.send(message).is_err() {
                 break;
             }
         }
+        
+        // 清理任务
+        recv_task.abort();
+        heartbeat_task.abort();
+        send_task.abort();
+        
+        Ok(())
     }
 
     async fn send_message(connection: &Connection, message: Message) -> Result<()> {
@@ -198,12 +184,5 @@ impl Client {
             .context("Failed to read message")?;
         
         Message::from_bytes(&data)
-    }
-
-    pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(connection) = self.connection.take() {
-            connection.close(0u32.into(), b"Goodbye");
-        }
-        Ok(())
     }
 }

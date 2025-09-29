@@ -12,17 +12,23 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(server_id: String) -> Result<Self> {
-        let client_config = crypto::create_client_config()
-            .context("Failed to create client config")?;
+    pub fn new(client_id: String) -> Result<Self> {
+        // 尝试使用服务器证书，如果不存在则使用不安全模式
+        let client_config = if std::path::Path::new("certs/server.crt").exists() {
+            println!("🔐 使用服务器证书进行安全连接");
+            let rustls_config = crypto::create_client_config_with_cert("certs/server.crt")?;
+            crypto::create_quinn_client_config(rustls_config)
+        } else {
+            println!("⚠️  使用不安全模式连接（跳过证书验证）");
+            let rustls_config = crypto::create_insecure_client_config()?;
+            crypto::create_quinn_client_config(rustls_config)
+        };
 
-        let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
-            .context("Failed to create client endpoint")?;
-        
-        endpoint.set_default_client_config(ClientConfig::new(Arc::new(client_config)));
+        let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+        endpoint.set_default_client_config(client_config);
 
         Ok(Self {
-            server_id,
+            server_id: client_id,
             endpoint,
             connection: None,
         })

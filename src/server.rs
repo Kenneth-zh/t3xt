@@ -14,8 +14,8 @@ pub struct Server {
 
 impl Server {
     pub fn new(server_id: String, port: u16) -> Result<Self> {
-        let cert_config = crypto::CertConfig::generate_self_signed()
-            .context("Failed to generate certificate")?;
+        let cert_config = crypto::CertConfig::get_or_create()
+            .context("Failed to get or create certificate")?;
 
         let server_config = crypto::create_server_config(cert_config)
             .context("Failed to create server config")?;

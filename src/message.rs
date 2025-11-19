@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// 极简消息类型 - 只保留核心功能
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,8 @@ impl Message {
     pub fn format_display(&self) -> String {
         match &self.message_type {
             MessageType::Text { content } => {
-                format!("[{}] {}: {}", 
+                format!(
+                    "[{}] {}: {}",
                     self.timestamp.format("%H:%M:%S"),
                     self.sender_id,
                     content

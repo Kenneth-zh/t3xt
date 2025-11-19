@@ -2,7 +2,10 @@ use crate::{crypto, message::*};
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint, ServerConfig};
 use std::sync::Arc;
-use tokio::{io::{AsyncBufReadExt, BufReader}, sync::RwLock};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::RwLock,
+};
 use tracing::{error, info, warn};
 
 pub struct Server {
@@ -14,17 +17,18 @@ pub struct Server {
 
 impl Server {
     pub fn new(server_id: String, port: u16) -> Result<Self> {
-        let cert_config = crypto::CertConfig::get_or_create()
-            .context("Failed to get or create certificate")?;
+        let cert_config =
+            crypto::CertConfig::get_or_create().context("Failed to get or create certificate")?;
 
-        let server_config = crypto::create_server_config(cert_config)
-            .context("Failed to create server config")?;
+        let server_config =
+            crypto::create_server_config(cert_config).context("Failed to create server config")?;
 
         let bind_addr = format!("0.0.0.0:{}", port);
         let endpoint = Endpoint::server(
             ServerConfig::with_crypto(Arc::new(server_config)),
             bind_addr.parse()?,
-        ).context("Failed to create server endpoint")?;
+        )
+        .context("Failed to create server endpoint")?;
 
         info!("服务器 {} 启动，监听地址: {}", server_id, bind_addr);
 
@@ -62,10 +66,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_incoming_connections(
-        endpoint: Endpoint,
-        peers: Arc<RwLock<Vec<Connection>>>,
-    ) {
+    async fn handle_incoming_connections(endpoint: Endpoint, peers: Arc<RwLock<Vec<Connection>>>) {
         while let Some(conn) = endpoint.accept().await {
             let connection = match conn.await {
                 Ok(conn) => conn,
@@ -77,7 +78,7 @@ impl Server {
 
             let remote_addr = connection.remote_address();
             info!("新连接来自: {}", remote_addr);
-            
+
             // 将连接加入 peers
             {
                 let mut peers_guard = peers.write().await;
@@ -115,7 +116,8 @@ impl Server {
                                     let peers_read = peers.read().await;
                                     for other_conn in peers_read.iter() {
                                         if other_conn.remote_address().to_string() != peer_addr {
-                                            let _ = Self::send_message(other_conn, message.clone()).await;
+                                            let _ = Self::send_message(other_conn, message.clone())
+                                                .await;
                                         }
                                     }
                                 }
@@ -132,7 +134,7 @@ impl Server {
                 }
             }
         }
-        
+
         {
             let mut peers_guard = peers.write().await;
             peers_guard.retain(|conn| conn.remote_address().to_string() != peer_addr);
@@ -142,27 +144,24 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_user_input(
-        peers: Arc<RwLock<Vec<Connection>>>,
-        server_id: String,
-    ) {
+    async fn handle_user_input(peers: Arc<RwLock<Vec<Connection>>>, server_id: String) {
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
-        
+
         while let Ok(Some(line)) = lines.next_line().await {
             let input = line.trim();
-            
+
             if input == "/quit" {
                 info!("服务器退出");
                 std::process::exit(0);
             }
-            
+
             if input.is_empty() {
                 continue;
             }
-            
+
             let message = Message::new_text(server_id.clone(), input.to_string());
-            
+
             let peers_read = peers.read().await;
             if peers_read.is_empty() {
                 println!("没有连接的客户端");
@@ -178,23 +177,27 @@ impl Server {
     }
 
     async fn send_message(connection: &Connection, message: Message) -> Result<()> {
-        let mut send = connection.open_uni().await
+        let mut send = connection
+            .open_uni()
+            .await
             .context("Failed to open stream")?;
-        
+
         let data = message.to_bytes()?;
-        send.write_all(&data).await
+        send.write_all(&data)
+            .await
             .context("Failed to send message")?;
-        
-        send.finish().await
-            .context("Failed to finish stream")?;
-        
+
+        send.finish().await.context("Failed to finish stream")?;
+
         Ok(())
     }
 
     async fn receive_message(recv: &mut quinn::RecvStream) -> Result<Message> {
-        let data = recv.read_to_end(8192).await
+        let data = recv
+            .read_to_end(8192)
+            .await
             .context("Failed to read message")?;
-        
+
         Message::from_bytes(&data)
     }
 }
